@@ -1,0 +1,58 @@
+name: Deploy to Oracle Cloud
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  REGION: eu-milan-1
+  NAMESPACE: ${{ secrets.OCIR_NAMESPACE }}
+  REPO_BACKEND: myplanner/backend
+  REPO_FRONTEND: myplanner/frontend
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to OCIR
+        run: |
+          echo "${{ secrets.OCIR_AUTH_TOKEN }}" | docker login ${{ env.REGION }}.ocir.io \
+            -u "${{ secrets.OCIR_NAMESPACE }}/${{ secrets.OCIR_USERNAME }}" --password-stdin
+
+      - name: Build and push backend
+        run: |
+          IMAGE=${{ env.REGION }}.ocir.io/${{ env.NAMESPACE }}/${{ env.REPO_BACKEND }}
+          docker build -t ${IMAGE}:${{ github.sha }} -t ${IMAGE}:latest MyPlanner_BackEnd
+          docker push ${IMAGE}:${{ github.sha }}
+          docker push ${IMAGE}:latest
+
+      - name: Build and push frontend
+        run: |
+          IMAGE=${{ env.REGION }}.ocir.io/${{ env.NAMESPACE }}/${{ env.REPO_FRONTEND }}
+          docker build MyPlanner_FrontEnd \
+            --build-arg VITE_API_URL=http://${{ secrets.VM_PUBLIC_IP }}:8000 \
+            -t ${IMAGE}:${{ github.sha }} -t ${IMAGE}:latest
+          docker push ${IMAGE}:${{ github.sha }}
+          docker push ${IMAGE}:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VM via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_PUBLIC_IP }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            echo "${{ secrets.OCIR_AUTH_TOKEN }}" | docker login ${{ env.REGION }}.ocir.io \
+              -u "${{ secrets.OCIR_NAMESPACE }}/${{ secrets.OCIR_USERNAME }}" --password-stdin
+            cd /opt/myplanner
+            docker compose --env-file docker-compose.env -f docker-compose.yml -f docker-compose.prod.yml pull
+            docker compose --env-file docker-compose.env -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
+

@@ -1,0 +1,2310 @@
+═══════════════════════════════════════════════════════════════════════════════
+              LINEA GUIDA SICUREZZA - APPLICAZIONI E DOCKER
+═══════════════════════════════════════════════════════════════════════════════
+Versione: 2.0
+Scopo: Guida completa per sviluppo sicuro di applicazioni e containerizzazione
+Destinatari: Sviluppatori, DevOps, AI Agents, Security Engineers
+Ultimo aggiornamento: 2025-11-12
+═══════════════════════════════════════════════════════════════════════════════
+
+INDICE
+1. SICUREZZA DELL'APPLICAZIONE
+2. SICUREZZA DOCKER E CONTAINERIZZAZIONE
+3. CI/CD E AUTOMAZIONE SICUREZZA
+4. MONITORING E INCIDENT RESPONSE
+5. COMPLIANCE E AUDIT
+6. CHECKLIST PRE-DEPLOY
+
+═══════════════════════════════════════════════════════════════════════════════
+1. SICUREZZA DELL'APPLICAZIONE
+═══════════════════════════════════════════════════════════════════════════════
+
+1.1 AUTENTICAZIONE E AUTORIZZAZIONE
+───────────────────────────────────────────────────────────────────────────────
+
+▸ PROTOCOLLI E STANDARD
+  □ OAuth 2.0 con PKCE (Proof Key for Code Exchange) per app mobile/SPA
+  □ OpenID Connect per identity layer sopra OAuth 2.0
+  □ SAML 2.0 per enterprise SSO
+  □ Multi-Factor Authentication (MFA/2FA) OBBLIGATORIO per admin e operazioni sensibili
+
+▸ JWT (JSON Web Tokens) - CONFIGURAZIONE SICURA
+  □ Algoritmo: HS256 (HMAC) o RS256 (RSA) - MAI 'none' o 'HS256' con chiavi deboli
+  □ Chiave segreta: minimo 256 bit (32 caratteri), generata crittograficamente
+  □ Expiration time (exp): 15-60 minuti per access token
+  □ Refresh token: 7-30 giorni, salvato in httpOnly cookie o secure storage
+  □ Validare sempre: iss (issuer), aud (audience), exp, nbf (not before)
+  □ Implementare token revocation/blacklist per logout forzato
+  
+  ESEMPIO JWT NODE.JS/EXPRESS:
+  ```javascript
+  const jwt = require('jsonwebtoken');
+  const SECRET_KEY = process.env.JWT_SECRET; // min 32 char random
+  const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
+  
+  // Generazione token
+  const accessToken = jwt.sign(
+    { userId: user.id, role: user.role },
+    SECRET_KEY,
+    { expiresIn: '15m', issuer: 'myapp', audience: 'myapp-users' }
+  );
+  
+  const refreshToken = jwt.sign(
+    { userId: user.id },
+    REFRESH_SECRET,
+    { expiresIn: '7d' }
+  );
+  
+  // Validazione
+  const verifyToken = (req, res, next) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) return res.status(401).json({ error: 'No token' });
+    
+    try {
+      const decoded = jwt.verify(token, SECRET_KEY, {
+        issuer: 'myapp',
+        audience: 'myapp-users'
+      });
+      req.user = decoded;
+      next();
+    } catch (err) {
+      return res.status(403).json({ error: 'Invalid token' });
+    }
+  };
+  ```
+
+▸ PASSWORD HASHING - BEST PRACTICE
+  □ USARE: bcrypt (cost factor 12-14), Argon2id (memory 64MB+), scrypt
+  □ MAI USARE: MD5, SHA1, SHA256 semplice
+  □ Salt automatico (integrato in bcrypt/argon2)
+  □ Pepper aggiuntivo (secret key application-wide) opzionale ma consigliato
+  
+  ESEMPIO BCRYPT NODE.JS:
+  ```javascript
+  const bcrypt = require('bcrypt');
+  const SALT_ROUNDS = 12;
+  
+  // Hashing password
+  const hashPassword = async (plainPassword) => {
+    return await bcrypt.hash(plainPassword, SALT_ROUNDS);
+  };
+  
+  // Verifica password
+  const verifyPassword = async (plainPassword, hashedPassword) => {
+    return await bcrypt.compare(plainPassword, hashedPassword);
+  };
+  ```
+  
+  ESEMPIO ARGON2 PYTHON:
+  ```python
+  from argon2 import PasswordHasher
+  ph = PasswordHasher(
+      time_cost=3,      # iterations
+      memory_cost=65536, # 64 MB
+      parallelism=4,
+      hash_len=32,
+      salt_len=16
+  )
+  
+  # Hash
+  hash = ph.hash("password123")
+  
+  # Verify
+  try:
+      ph.verify(hash, "password123")
+      # Se serve rehash per parametri aggiornati
+      if ph.check_needs_rehash(hash):
+          hash = ph.hash("password123")
+  except:
+      # Password errata
+      pass
+  ```
+
+▸ PRINCIPIO DEL PRIVILEGIO MINIMO (LEAST PRIVILEGE)
+  □ Role-Based Access Control (RBAC): user, editor, admin, superadmin
+  □ Attribute-Based Access Control (ABAC) per logiche complesse
+  □ Permessi granulari: read, write, delete, admin per ogni risorsa
+  □ Policy as Code: definire permessi in file configurazione (YAML/JSON)
+  
+  ESEMPIO RBAC MIDDLEWARE EXPRESS:
+  ```javascript
+  const requireRole = (allowedRoles) => {
+    return (req, res, next) => {
+      if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+      
+      if (!allowedRoles.includes(req.user.role)) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      next();
+    };
+  };
+  
+  // Uso
+  app.delete('/api/users/:id', verifyToken, requireRole(['admin', 'superadmin']), deleteUser);
+  ```
+
+▸ RATE LIMITING E PROTEZIONE BRUTE FORCE
+  □ Rate limit globale: 100 req/min per IP
+  □ Rate limit login: 5 tentativi/15 minuti per IP o username
+  □ Account lockout dopo N tentativi falliti (5-10)
+  □ CAPTCHA dopo 3 tentativi falliti
+  □ Progressive delay tra tentativi (1s, 2s, 4s, 8s...)
+  
+  ESEMPIO EXPRESS-RATE-LIMIT:
+  ```javascript
+  const rateLimit = require('express-rate-limit');
+  
+  // Rate limit globale
+  const globalLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minuto
+    max: 100, // 100 richieste
+    message: 'Troppe richieste da questo IP'
+  });
+  
+  // Rate limit login
+  const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minuti
+    max: 5,
+    skipSuccessfulRequests: true, // Non conta login riusciti
+    message: 'Troppi tentativi di login. Riprova tra 15 minuti'
+  });
+  
+  app.use('/api/', globalLimiter);
+  app.post('/api/auth/login', loginLimiter, loginHandler);
+  ```
+  
+  ESEMPIO NGINX RATE LIMITING:
+  ```nginx
+  http {
+      limit_req_zone $binary_remote_addr zone=loginlimit:10m rate=5r/m;
+      limit_req_zone $binary_remote_addr zone=apilimit:10m rate=100r/m;
+      
+      server {
+          location /api/auth/login {
+              limit_req zone=loginlimit burst=2 nodelay;
+          }
+          
+          location /api/ {
+              limit_req zone=apilimit burst=20;
+          }
+      }
+  }
+  ```
+
+▸ SESSION MANAGEMENT
+  □ Sessioni server-side con Redis/Memcached
+  □ Session ID: min 128 bit, crittograficamente random
+  □ Cookie sicuri: httpOnly, secure, sameSite=strict
+  □ Session timeout: 30 min inattività, 12-24h massimo
+  □ Invalidare sessione dopo logout, cambio password, privilege escalation
+  
+  ESEMPIO EXPRESS-SESSION:
+  ```javascript
+  const session = require('express-session');
+  const RedisStore = require('connect-redis')(session);
+  
+  app.use(session({
+    store: new RedisStore({ client: redisClient }),
+    secret: process.env.SESSION_SECRET, // min 32 char
+    name: 'sessionId', // Non usare default 'connect.sid'
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: true,        // Solo HTTPS
+      httpOnly: true,      // No access da JavaScript
+      sameSite: 'strict',  // CSRF protection
+      maxAge: 1800000      // 30 minuti
+    }
+  }));
+  ```
+
+1.2 PROTEZIONE DEI DATI
+───────────────────────────────────────────────────────────────────────────────
+
+▸ HTTPS/TLS - CONFIGURAZIONE OBBLIGATORIA
+  □ TLS 1.2+ OBBLIGATORIO (disabilitare TLS 1.0, 1.1, SSLv3)
+  □ TLS 1.3 preferito (riduce latency, migliora sicurezza)
+  □ Certificati da CA riconosciute (Let's Encrypt, DigiCert, GlobalSign)
+  □ Certificato wildcard per sottodomini (*.example.com)
+  □ HSTS (HTTP Strict Transport Security) header abilitato
+  □ Certificate pinning per app mobile/critical
+  
+  NGINX TLS CONFIGURATION:
+  ```nginx
+  server {
+      listen 443 ssl http2;
+      server_name example.com;
+      
+      # Certificati
+      ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;
+      ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+      
+      # Protocolli sicuri
+      ssl_protocols TLSv1.2 TLSv1.3;
+      ssl_prefer_server_ciphers on;
+      ssl_ciphers 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305';
+      
+      # HSTS
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+      
+      # Redirect HTTP to HTTPS
+      if ($scheme != "https") {
+          return 301 https://$server_name$request_uri;
+      }
+  }
+  ```
+  
+  APACHE TLS CONFIGURATION:
+  ```apache
+  <VirtualHost *:443>
+      ServerName example.com
+      SSLEngine on
+      SSLCertificateFile /etc/letsencrypt/live/example.com/fullchain.pem
+      SSLCertificateKeyFile /etc/letsencrypt/live/example.com/privkey.pem
+      
+      SSLProtocol -all +TLSv1.2 +TLSv1.3
+      SSLCipherSuite ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384
+      SSLHonorCipherOrder on
+      
+      Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+  </VirtualHost>
+  ```
+
+▸ CRITTOGRAFIA DATI A RIPOSO (Data at Rest)
+  □ Algorithm: AES-256-GCM (AES-256 in Galois/Counter Mode)
+  □ Key management: AWS KMS, Azure Key Vault, HashiCorp Vault, Google Cloud KMS
+  □ Crittografare: password, token, PII, dati sanitari, finanziari, carte credito
+  □ Database: Transparent Data Encryption (TDE) per MySQL/PostgreSQL/MongoDB
+  □ Filesystem: LUKS (Linux), BitLocker (Windows), FileVault (macOS)
+  
+  ESEMPIO CRITTOGRAFIA NODE.JS:
+  ```javascript
+  const crypto = require('crypto');
+  
+  class EncryptionService {
+    constructor() {
+      this.algorithm = 'aes-256-gcm';
+      this.key = Buffer.from(process.env.ENCRYPTION_KEY, 'hex'); // 32 bytes
+    }
+    
+    encrypt(plaintext) {
+      const iv = crypto.randomBytes(16); // Initialization vector
+      const cipher = crypto.createCipheriv(this.algorithm, this.key, iv);
+      
+      let encrypted = cipher.update(plaintext, 'utf8', 'hex');
+      encrypted += cipher.final('hex');
+      
+      const authTag = cipher.getAuthTag();
+      
+      // Formato: iv:authTag:encrypted
+      return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
+    }
+    
+    decrypt(ciphertext) {
+      const parts = ciphertext.split(':');
+      const iv = Buffer.from(parts[0], 'hex');
+      const authTag = Buffer.from(parts[1], 'hex');
+      const encrypted = parts[2];
+      
+      const decipher = crypto.createDecipheriv(this.algorithm, this.key, iv);
+      decipher.setAuthTag(authTag);
+      
+      let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
+      
+      return decrypted;
+    }
+  }
+  ```
+  
+  ESEMPIO CRITTOGRAFIA PYTHON:
+  ```python
+  from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+  import os
+  
+  class EncryptionService:
+      def __init__(self, key: bytes):
+          self.cipher = AESGCM(key)  # key deve essere 32 bytes
+      
+      def encrypt(self, plaintext: str) -> bytes:
+          nonce = os.urandom(12)  # 96 bit nonce per GCM
+          ciphertext = self.cipher.encrypt(nonce, plaintext.encode(), None)
+          return nonce + ciphertext
+      
+      def decrypt(self, data: bytes) -> str:
+          nonce = data[:12]
+          ciphertext = data[12:]
+          plaintext = self.cipher.decrypt(nonce, ciphertext, None)
+          return plaintext.decode()
+  ```
+
+▸ CRITTOGRAFIA DATI IN TRANSITO (Data in Transit)
+  □ HTTPS/TLS per HTTP traffic (già coperto sopra)
+  □ mTLS (mutual TLS) per service-to-service communication
+  □ VPN/WireGuard per connessioni remote
+  □ SSH con chiavi ED25519 (no password)
+  □ Database: SSL/TLS connections (PostgreSQL, MySQL, MongoDB)
+  
+  POSTGRESQL SSL CONNECTION:
+  ```javascript
+  const { Pool } = require('pg');
+  const pool = new Pool({
+    host: 'db.example.com',
+    database: 'mydb',
+    user: 'dbuser',
+    password: process.env.DB_PASSWORD,
+    ssl: {
+      rejectUnauthorized: true,
+      ca: fs.readFileSync('/path/to/ca-certificate.crt').toString(),
+    }
+  });
+  ```
+
+▸ INPUT VALIDATION E SANITIZATION
+  □ Validare SEMPRE lato server (mai fidarsi del client)
+  □ Whitelist approach: definire cosa è permesso, non cosa è vietato
+  □ Type validation: string, number, email, URL, UUID
+  □ Length limits: min/max characters
+  □ Regex pattern matching per formati specifici
+  □ Sanitize HTML: rimuovere tag pericolosi
+  
+  ESEMPIO VALIDATION NODE.JS (express-validator):
+  ```javascript
+  const { body, validationResult } = require('express-validator');
+  
+  app.post('/api/users', [
+    body('email')
+      .isEmail().normalizeEmail()
+      .withMessage('Email non valida'),
+    body('username')
+      .isLength({ min: 3, max: 20 }).trim().escape()
+      .matches(/^[a-zA-Z0-9_]+$/)
+      .withMessage('Username deve essere 3-20 caratteri alfanumerici'),
+    body('age')
+      .isInt({ min: 18, max: 120 })
+      .withMessage('Età deve essere tra 18 e 120'),
+    body('website')
+      .optional()
+      .isURL({ protocols: ['http', 'https'], require_protocol: true })
+      .withMessage('URL non valido')
+  ], (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+    // Procedi con logica
+  });
+  ```
+  
+  ESEMPIO SANITIZATION PYTHON (bleach):
+  ```python
+  import bleach
+  from bleach.css_sanitizer import CSSSanitizer
+  
+  # Whitelist tag e attributi permessi
+  ALLOWED_TAGS = ['p', 'br', 'strong', 'em', 'a', 'ul', 'ol', 'li']
+  ALLOWED_ATTRS = {'a': ['href', 'title']}
+  ALLOWED_PROTOCOLS = ['http', 'https', 'mailto']
+  
+  def sanitize_html(dirty_html):
+      return bleach.clean(
+          dirty_html,
+          tags=ALLOWED_TAGS,
+          attributes=ALLOWED_ATTRS,
+          protocols=ALLOWED_PROTOCOLS,
+          strip=True
+      )
+  
+  # Uso
+  user_input = "<script>alert('XSS')</script><p>Testo valido</p>"
+  safe_html = sanitize_html(user_input)  # "<p>Testo valido</p>"
+  ```
+
+▸ PREVENZIONE SQL INJECTION
+  □ SEMPRE usare prepared statements / parametrized queries
+  □ MAI concatenare input utente in query SQL
+  □ ORM (Sequelize, TypeORM, SQLAlchemy, Django ORM) con query builder
+  □ Least privilege database user (no DROP, no GRANT)
+  
+  ESEMPI CORRETTI:
+  ```javascript
+  // ✅ CORRETTO - Prepared statement (Node.js pg)
+  const result = await pool.query(
+    'SELECT * FROM users WHERE email = $1 AND status = $2',
+    [userEmail, 'active']
+  );
+  
+  // ✅ CORRETTO - Sequelize ORM
+  const users = await User.findAll({
+    where: {
+      email: userEmail,
+      status: 'active'
+    }
+  });
+  
+  // ❌ SBAGLIATO - String concatenation
+  const query = `SELECT * FROM users WHERE email = '${userEmail}'`; // NO!
+  ```
+  
+  ```python
+  # ✅ CORRETTO - Parameterized query (Python psycopg2)
+  cursor.execute(
+      "SELECT * FROM users WHERE email = %s AND status = %s",
+      (user_email, 'active')
+  )
+  
+  # ✅ CORRETTO - Django ORM
+  users = User.objects.filter(email=user_email, status='active')
+  
+  # ❌ SBAGLIATO - String formatting
+  query = f"SELECT * FROM users WHERE email = '{user_email}'"  # NO!
+  ```
+
+▸ PREVENZIONE XSS (Cross-Site Scripting)
+  □ Escape output in HTML context
+  □ Content Security Policy (CSP) headers
+  □ Use frameworks con auto-escaping (React, Vue, Angular)
+  □ DOMPurify per sanitizzazione client-side
+  □ HTTPOnly cookie per session token
+  
+  CSP HEADER EXAMPLE:
+  ```javascript
+  // Express middleware
+  app.use((req, res, next) => {
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'self'; " +
+      "script-src 'self' 'unsafe-inline' https://cdn.example.com; " +
+      "style-src 'self' 'unsafe-inline'; " +
+      "img-src 'self' data: https:; " +
+      "font-src 'self' https://fonts.gstatic.com; " +
+      "connect-src 'self' https://api.example.com; " +
+      "frame-ancestors 'none'; " +
+      "base-uri 'self'; " +
+      "form-action 'self'"
+    );
+    next();
+  });
+  ```
+  
+  DOMPURIFY CLIENT-SIDE:
+  ```javascript
+  import DOMPurify from 'dompurify';
+  
+  const dirty = '<img src=x onerror=alert(1)>';
+  const clean = DOMPurify.sanitize(dirty);
+  document.getElementById('content').innerHTML = clean;
+  ```
+
+▸ GESTIONE DATI SENSIBILI
+  □ PII (Personally Identifiable Information): nome, email, telefono, indirizzo
+  □ PHI (Protected Health Information): dati medici/sanitari
+  □ PCI-DSS: dati carte di credito (MAI salvare CVV, usare tokenization)
+  □ Minimizzazione dati: raccogliere solo lo stretto necessario
+  □ Data retention policy: cancellare dati dopo N giorni/mesi
+  □ Right to be forgotten (GDPR): implementare cancellazione utente
+  □ Anonymization/Pseudonymization per analytics
+  
+  NON LOGGARE MAI:
+  - Password (anche hashate nei log)
+  - Token di autenticazione
+  - Numeri carte di credito
+  - SSN, codici fiscali
+  - Dati sanitari
+  
+  LOGGING SICURO:
+  ```javascript
+  // ❌ SBAGLIATO
+  logger.info(`User login: ${email}, password: ${password}`); // NO!
+  logger.info(`Payment: card ${cardNumber}, cvv ${cvv}`); // NO!
+  
+  // ✅ CORRETTO
+  logger.info(`User login attempt: ${email}`);
+  logger.info(`Payment processed: card ending ****${cardNumber.slice(-4)}`);
+  
+  // Redact sensitive data in logs
+  const sanitizeLogData = (data) => {
+    const sanitized = { ...data };
+    const sensitiveFields = ['password', 'token', 'ssn', 'cardNumber', 'cvv'];
+    sensitiveFields.forEach(field => {
+      if (sanitized[field]) {
+        sanitized[field] = '[REDACTED]';
+      }
+    });
+    return sanitized;
+  };
+  ```
+
+1.3 SICUREZZA DEL CODICE E DELLE DIPENDENZE
+───────────────────────────────────────────────────────────────────────────────
+
+▸ GESTIONE DIPENDENZE E AGGIORNAMENTI
+  □ Dependency scanning automatico: npm audit, pip-audit, Snyk, Dependabot
+  □ Lock files obbligatori: package-lock.json, yarn.lock, Pipfile.lock, Gemfile.lock
+  □ Aggiornamenti regolari: patch security ogni settimana, minor/major ogni mese
+  □ Automated dependency updates: Dependabot, Renovate Bot
+  □ Vulnerability database: CVE, NVD, GitHub Security Advisories
+  
+  COMANDI AUDIT:
+  ```bash
+  # Node.js - npm
+  npm audit
+  npm audit fix              # Applica fix automatici
+  npm audit fix --force      # Include breaking changes
+  
+  # Node.js - yarn
+  yarn audit
+  yarn audit --level moderate  # Solo moderate/high/critical
+  
+  # Python
+  pip install pip-audit
+  pip-audit
+  
+  # Python - Safety
+  pip install safety
+  safety check
+  safety check --json > vulnerabilities.json
+  
+  # Ruby
+  bundle audit check --update
+  
+  # Java - OWASP Dependency Check
+  mvn org.owasp:dependency-check-maven:check
+  ```
+  
+  GITHUB DEPENDABOT CONFIG (.github/dependabot.yml):
+  ```yaml
+  version: 2
+  updates:
+    - package-ecosystem: "npm"
+      directory: "/"
+      schedule:
+        interval: "weekly"
+      open-pull-requests-limit: 10
+      reviewers:
+        - "security-team"
+      labels:
+        - "dependencies"
+        - "security"
+      
+    - package-ecosystem: "docker"
+      directory: "/"
+      schedule:
+        interval: "weekly"
+  ```
+
+▸ STATIC APPLICATION SECURITY TESTING (SAST)
+  □ Tool: SonarQube, CodeQL, Semgrep, ESLint security plugins, Bandit (Python)
+  □ Integrare in CI/CD pipeline
+  □ Code smells: complessità ciclomatica, code duplication
+  □ Security hotspots: hardcoded credentials, weak crypto, SQL injection
+  
+  SONARQUBE EXAMPLE:
+  ```bash
+  # Install SonarScanner
+  npm install -g sonarqube-scanner
+  
+  # Run analysis
+  sonar-scanner \
+    -Dsonar.projectKey=myproject \
+    -Dsonar.sources=. \
+    -Dsonar.host.url=http://localhost:9000 \
+    -Dsonar.login=YOUR_TOKEN
+  ```
+  
+  ESLINT SECURITY PLUGIN:
+  ```javascript
+  // .eslintrc.js
+  module.exports = {
+    plugins: ['security'],
+    extends: ['plugin:security/recommended'],
+    rules: {
+      'security/detect-object-injection': 'error',
+      'security/detect-non-literal-regexp': 'warn',
+      'security/detect-unsafe-regex': 'error',
+      'security/detect-buffer-noassert': 'error',
+      'security/detect-eval-with-expression': 'error',
+      'security/detect-no-csrf-before-method-override': 'error',
+      'security/detect-possible-timing-attacks': 'warn'
+    }
+  };
+  ```
+  
+  BANDIT (PYTHON):
+  ```bash
+  pip install bandit
+  bandit -r . -f json -o bandit-report.json
+  bandit -r . -ll  # Solo low severity e above
+  ```
+
+▸ DYNAMIC APPLICATION SECURITY TESTING (DAST)
+  □ Tool: OWASP ZAP, Burp Suite, Nuclei, Acunetix
+  □ Penetration testing automatizzato su app running
+  □ Testa: SQL injection, XSS, CSRF, auth bypass, insecure configs
+  
+  OWASP ZAP BASELINE SCAN:
+  ```bash
+  docker run -t owasp/zap2docker-stable zap-baseline.py \
+    -t https://www.example.com \
+    -g gen.conf \
+    -r zap-report.html
+  ```
+
+▸ SOFTWARE COMPOSITION ANALYSIS (SCA)
+  □ Tool: Snyk, WhiteSource, Black Duck, Mend
+  □ License compliance: MIT, Apache, GPL compatibility
+  □ Vulnerabilità note in dependencies
+  
+  SNYK EXAMPLE:
+  ```bash
+  npm install -g snyk
+  snyk auth
+  snyk test                # Test vulnerabilities
+  snyk monitor            # Monitor continuously
+  snyk test --severity-threshold=high  # Solo high/critical
+  ```
+
+▸ SECRET SCANNING
+  □ Tool: GitGuardian, TruffleHog, Gitleaks, detect-secrets
+  □ Scansionare repo per API keys, password, token
+  □ Pre-commit hooks per bloccare commit con secrets
+  
+  GITLEAKS:
+  ```bash
+  # Install
+  brew install gitleaks  # macOS
+  
+  # Scan repo
+  gitleaks detect --source . --verbose
+  
+  # Scan all history
+  gitleaks detect --source . --log-opts="--all"
+  
+  # Pre-commit hook
+  gitleaks protect --staged
+  ```
+  
+  GITLEAKS CONFIG (.gitleaks.toml):
+  ```toml
+  title = "Gitleaks Config"
+  
+  [[rules]]
+  description = "AWS Access Key"
+  regex = '''AKIA[0-9A-Z]{16}'''
+  tags = ["key", "AWS"]
+  
+  [[rules]]
+  description = "Generic API Key"
+  regex = '''(?i)api[_-]?key[_-]?[=:]\s*['"][0-9a-zA-Z]{32,}['"]'''
+  tags = ["key", "API"]
+  ```
+
+▸ CODE REVIEW E BEST PRACTICE
+  □ Peer review obbligatorio per ogni PR
+  □ Security checklist in PR template
+  □ Branch protection: require approvals (min 2), no force push
+  □ Signed commits (GPG key)
+  □ Conventional commits per changelog automatico
+  
+  GITHUB BRANCH PROTECTION:
+  Settings → Branches → Branch protection rules
+  ✅ Require pull request reviews before merging (2 approvals)
+  ✅ Require status checks to pass
+  ✅ Require branches to be up to date
+  ✅ Require signed commits
+  ✅ Include administrators
+  ✅ Restrict who can push
+
+▸ SEPARAZIONE LOGICA E ARCHITETTURA
+  □ Separation of concerns: business logic, data access, presentation
+  □ Environment variables per config: no hardcoding
+  □ Config files fuori da repository (.env in .gitignore)
+  □ Secrets management: HashiCorp Vault, AWS Secrets Manager, Azure Key Vault
+  
+  .env.example (TEMPLATE DA COMMITTARE):
+  ```bash
+  # Database
+  DB_HOST=localhost
+  DB_PORT=5432
+  DB_NAME=myapp
+  DB_USER=dbuser
+  DB_PASSWORD=CHANGE_ME
+  
+  # JWT
+  JWT_SECRET=GENERATE_32_CHAR_RANDOM_STRING
+  JWT_REFRESH_SECRET=GENERATE_32_CHAR_RANDOM_STRING
+  
+  # Encryption
+  ENCRYPTION_KEY=GENERATE_64_HEX_CHARS
+  
+  # External APIs
+  STRIPE_API_KEY=sk_test_XXXXXXXXXX
+  SENDGRID_API_KEY=SG.XXXXXXXXXX
+  ```
+  
+  DOTENV USAGE:
+  ```javascript
+  // Node.js
+  require('dotenv').config();
+  const dbPassword = process.env.DB_PASSWORD;
+  
+  // Validazione env vars
+  const requiredEnvVars = ['DB_PASSWORD', 'JWT_SECRET', 'ENCRYPTION_KEY'];
+  requiredEnvVars.forEach(varName => {
+    if (!process.env[varName]) {
+      throw new Error(`Environment variable ${varName} is required`);
+    }
+  });
+  ```
+
+1.4 PROTEZIONE CONTRO ATTACCHI COMUNI
+───────────────────────────────────────────────────────────────────────────────
+
+▸ CROSS-SITE SCRIPTING (XSS) - GIÀ COPERTO IN 1.2
+  Vedere sezione 1.2 per dettagli completi su:
+  - Content Security Policy (CSP)
+  - DOMPurify
+  - Output escaping
+  - Framework auto-escaping
+
+▸ CROSS-SITE REQUEST FORGERY (CSRF)
+  □ CSRF token per ogni form e state-changing request
+  □ SameSite cookie attribute
+  □ Double submit cookie pattern
+  □ Custom header validation (X-Requested-With)
+  
+  CSRF PROTECTION EXPRESS (csurf):
+  ```javascript
+  const csrf = require('csurf');
+  const csrfProtection = csrf({ cookie: true });
+  
+  app.use(csrfProtection);
+  
+  // Render form con token
+  app.get('/form', (req, res) => {
+    res.render('form', { csrfToken: req.csrfToken() });
+  });
+  
+  // Validate token
+  app.post('/process', csrfProtection, (req, res) => {
+    res.send('Form processed');
+  });
+  ```
+  
+  HTML FORM:
+  ```html
+  <form method="POST" action="/process">
+    <input type="hidden" name="_csrf" value="{{csrfToken}}">
+    <input type="text" name="email">
+    <button type="submit">Submit</button>
+  </form>
+  ```
+  
+  AXIOS CLIENT-SIDE:
+  ```javascript
+  // Invia CSRF token in header
+  axios.defaults.headers.common['X-CSRF-Token'] = csrfToken;
+  
+  axios.post('/api/data', { value: 123 })
+    .then(response => console.log(response.data));
+  ```
+
+▸ CLICKJACKING
+  □ X-Frame-Options: DENY o SAMEORIGIN
+  □ Content-Security-Policy: frame-ancestors 'none'
+  
+  ```javascript
+  app.use((req, res, next) => {
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+    next();
+  });
+  ```
+
+▸ ERROR HANDLING E INFORMATION DISCLOSURE
+  □ MAI esporre stack trace in produzione
+  □ Messaggi errore generici per l'utente
+  □ Log dettagliati solo server-side
+  □ Custom error pages (404, 500)
+  
+  EXPRESS ERROR HANDLER:
+  ```javascript
+  // Error middleware (deve essere ultimo)
+  app.use((err, req, res, next) => {
+    // Log completo server-side
+    logger.error({
+      message: err.message,
+      stack: err.stack,
+      url: req.url,
+      method: req.method,
+      ip: req.ip,
+      userId: req.user?.id
+    });
+    
+    // Response generica al client
+    if (process.env.NODE_ENV === 'production') {
+      res.status(500).json({
+        error: 'Internal server error',
+        requestId: req.id  // Per supporto
+      });
+    } else {
+      // Solo in development
+      res.status(500).json({
+        error: err.message,
+        stack: err.stack
+      });
+    }
+  });
+  ```
+
+▸ DENIAL OF SERVICE (DoS) PROTECTION
+  □ Rate limiting (già coperto in 1.1)
+  □ Request size limits
+  □ Timeout su operazioni lunghe
+  □ Connection pooling
+  □ CDN per static assets (Cloudflare, Fastly)
+  □ Load balancer con health checks
+  
+  EXPRESS LIMITS:
+  ```javascript
+  const express = require('express');
+  const app = express();
+  
+  // Body parser limits
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+  
+  // Request timeout
+  app.use((req, res, next) => {
+    res.setTimeout(30000, () => {  // 30 secondi
+      res.status(408).json({ error: 'Request timeout' });
+    });
+    next();
+  });
+  ```
+
+▸ INSECURE DESERIALIZATION
+  □ Validare data type prima di deserializzare
+  □ Evitare eval(), Function(), vm.runInNewContext()
+  □ JSON.parse solo con input validati
+  □ Usare schema validation (Joi, Yup, Zod)
+  
+  SCHEMA VALIDATION (ZOD):
+  ```javascript
+  const { z } = require('zod');
+  
+  const userSchema = z.object({
+    email: z.string().email(),
+    age: z.number().int().min(18).max(120),
+    role: z.enum(['user', 'admin']),
+    preferences: z.object({
+      theme: z.enum(['light', 'dark']),
+      notifications: z.boolean()
+    }).optional()
+  });
+  
+  app.post('/api/users', (req, res) => {
+    try {
+      const validData = userSchema.parse(req.body);
+      // Procedi con validData
+    } catch (error) {
+      return res.status(400).json({ error: error.errors });
+    }
+  });
+  ```
+
+▸ SERVER-SIDE REQUEST FORGERY (SSRF)
+  □ Whitelist URL/domini permessi
+  □ Bloccare IP privati (127.0.0.1, 10.x, 192.168.x, 169.254.x)
+  □ No redirect automatici
+  □ Validare protocol (solo http/https)
+  
+  SSRF PROTECTION:
+  ```javascript
+  const URL = require('url').URL;
+  const axios = require('axios');
+  
+  const isPrivateIP = (hostname) => {
+    const privateRanges = [
+      /^127\./,
+      /^10\./,
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./,
+      /^192\.168\./,
+      /^169\.254\./,
+      /^localhost$/i
+    ];
+    return privateRanges.some(range => range.test(hostname));
+  };
+  
+  const fetchURL = async (urlString) => {
+    const url = new URL(urlString);
+    
+    // Validate protocol
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      throw new Error('Invalid protocol');
+    }
+    
+    // Block private IPs
+    if (isPrivateIP(url.hostname)) {
+      throw new Error('Private IP addresses not allowed');
+    }
+    
+    // Whitelist domains
+    const allowedDomains = ['api.example.com', 'cdn.example.com'];
+    if (!allowedDomains.includes(url.hostname)) {
+      throw new Error('Domain not allowed');
+    }
+    
+    return await axios.get(urlString, {
+      maxRedirects: 0,
+      timeout: 5000
+    });
+  };
+  ```
+
+1.5 SICUREZZA DEI SERVIZI E API
+───────────────────────────────────────────────────────────────────────────────
+
+▸ API INPUT VALIDATION (GIÀ COPERTO IN 1.2)
+  Vedere sezione 1.2 per validation completa
+
+▸ API VERSIONING
+  □ Versioning nel path: /api/v1/users, /api/v2/users
+  □ Deprecation policy: supportare N versioni, annunciare EOL con anticipo
+  □ Header X-API-Version
+  
+  ```javascript
+  // Express routing per versioni
+  const v1Router = require('./routes/v1');
+  const v2Router = require('./routes/v2');
+  
+  app.use('/api/v1', v1Router);
+  app.use('/api/v2', v2Router);
+  ```
+
+▸ API RATE LIMITING E THROTTLING (GIÀ COPERTO IN 1.1)
+  Vedere sezione 1.1 per rate limiting completo
+
+▸ API AUTHENTICATION (GIÀ COPERTO IN 1.1)
+  JWT, OAuth2, API Keys - vedere sezione 1.1
+
+▸ API AUTHORIZATION - GRANULAR PERMISSIONS
+  □ Resource-level permissions
+  □ Scope-based access (OAuth2 scopes)
+  □ API key con scopes limitati
+  
+  OAUTH2 SCOPES:
+  ```javascript
+  // Richiedi specifici scopes
+  const requiredScopes = ['read:users', 'write:users'];
+  
+  const checkScopes = (required) => (req, res, next) => {
+    const tokenScopes = req.user.scopes || [];
+    const hasAllScopes = required.every(scope => tokenScopes.includes(scope));
+    
+    if (!hasAllScopes) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+    next();
+  };
+  
+  app.get('/api/users', verifyToken, checkScopes(['read:users']), getUsers);
+  app.post('/api/users', verifyToken, checkScopes(['write:users']), createUser);
+  ```
+
+▸ AUDIT LOGGING
+  □ Log tutti gli accessi API con: user, timestamp, endpoint, method, IP, response status
+  □ Log modifiche dati (create, update, delete) con before/after values
+  □ Retention policy: minimo 90 giorni, 1+ anno per dati critici
+  □ Log aggregation: ELK Stack, Splunk, Datadog, CloudWatch
+  
+  AUDIT LOG MIDDLEWARE:
+  ```javascript
+  const auditLogger = (req, res, next) => {
+    const startTime = Date.now();
+    
+    // Intercept response
+    const originalSend = res.send;
+    res.send = function(data) {
+      res.send = originalSend;
+      
+      const duration = Date.now() - startTime;
+      
+      // Log audit trail
+      logger.info('API_AUDIT', {
+        timestamp: new Date().toISOString(),
+        userId: req.user?.id,
+        email: req.user?.email,
+        method: req.method,
+        path: req.path,
+        query: req.query,
+        statusCode: res.statusCode,
+        duration,
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+        requestId: req.id
+      });
+      
+      return res.send(data);
+    };
+    
+    next();
+  };
+  
+  app.use(auditLogger);
+  ```
+
+▸ API DOCUMENTATION E SWAGGER/OpenAPI
+  □ Documentazione auto-generata con Swagger/OpenAPI 3.0
+  □ Proteggere /docs endpoint (solo interno o con auth)
+  □ Example requests/responses
+  □ Schema validation
+  
+  SWAGGER SETUP:
+  ```javascript
+  const swaggerJsDoc = require('swagger-jsdoc');
+  const swaggerUi = require('swagger-ui-express');
+  
+  const swaggerOptions = {
+    definition: {
+      openapi: '3.0.0',
+      info: {
+        title: 'My API',
+        version: '1.0.0',
+        description: 'API Documentation'
+      },
+      servers: [{ url: '/api/v1' }],
+      components: {
+        securitySchemes: {
+          bearerAuth: {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: 'JWT'
+          }
+        }
+      },
+      security: [{ bearerAuth: [] }]
+    },
+    apis: ['./routes/*.js']
+  };
+  
+  const swaggerDocs = swaggerJsDoc(swaggerOptions);
+  
+  // Proteggere con auth
+  app.use('/api-docs', verifyToken, requireRole(['admin']), 
+          swaggerUi.serve, swaggerUi.setup(swaggerDocs));
+  ```
+
+▸ CORS (Cross-Origin Resource Sharing)
+  □ Whitelist specifici origins (no wildcard * in produzione)
+  □ Credenziali (cookies) solo per trusted origins
+  □ Limitare metodi permessi
+  
+  CORS CONFIGURATION:
+  ```javascript
+  const cors = require('cors');
+  
+  const corsOptions = {
+    origin: function (origin, callback) {
+      const allowedOrigins = [
+        'https://example.com',
+        'https://app.example.com',
+        'https://admin.example.com'
+      ];
+      
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID'],
+    exposedHeaders: ['X-Total-Count'],
+    maxAge: 86400  // 24 ore
+  };
+  
+  app.use(cors(corsOptions));
+  ```
+
+▸ SECURITY HEADERS
+  □ Helmet.js per Express (auto-configura headers sicuri)
+  □ X-Content-Type-Options: nosniff
+  □ X-Frame-Options: DENY
+  □ X-XSS-Protection: 1; mode=block
+  □ Strict-Transport-Security (HSTS)
+  □ Referrer-Policy: no-referrer
+  
+  ```javascript
+  const helmet = require('helmet');
+  
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "https:"]
+      }
+    },
+    hsts: {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: true
+    }
+  }));
+  ```
+
+═══════════════════════════════════════════════════════════════════════════════
+2. SICUREZZA DOCKER E CONTAINERIZZAZIONE
+═══════════════════════════════════════════════════════════════════════════════
+
+2.1 GESTIONE DELLE IMMAGINI
+───────────────────────────────────────────────────────────────────────────────
+
+▸ SCELTA IMMAGINI BASE
+  □ USARE: immagini ufficiali da Docker Hub, Red Hat Registry
+  □ PREFERIRE: immagini minimali (alpine, distroless, slim)
+  □ EVITARE: immagini unknown/non-verificate, immagini latest tag
+  □ Tag specifici con versione: node:18.17.1-alpine, postgres:15.3-alpine
+  
+  ESEMPI IMMAGINI SICURE:
+  ```dockerfile
+  # ✅ CORRETTO - Official, versioned, minimal
+  FROM node:18.17.1-alpine
+  FROM python:3.11-slim
+  FROM postgres:15.3-alpine
+  FROM nginx:1.25-alpine
+  FROM redis:7.0-alpine
+  
+  # ✅ ULTRA SICURO - Google Distroless (no shell, minimal attack surface)
+  FROM gcr.io/distroless/nodejs18-debian11
+  FROM gcr.io/distroless/python3-debian11
+  
+  # ❌ EVITARE
+  FROM node:latest           # Tag impreciso
+  FROM ubuntu:22.04         # Immagine full, troppo grande
+  FROM randomuser/myimage   # Non verificata
+  ```
+
+▸ DOCKER IMAGE SCANNING
+  □ Tool: Trivy, Snyk Container, Aqua Security, Clair, Docker Scout
+  □ Scansionare per CVE noti
+  □ Integrare in CI/CD pipeline
+  □ Bloccare deploy se critical/high vulnerabilities
+  
+  TRIVY SCANNING:
+  ```bash
+  # Install Trivy
+  brew install trivy  # macOS
+  apt-get install trivy  # Debian/Ubuntu
+  
+  # Scan immagine locale
+  trivy image node:18-alpine
+  
+  # Scan con severity threshold
+  trivy image --severity HIGH,CRITICAL node:18-alpine
+  
+  # Output JSON
+  trivy image -f json -o results.json node:18-alpine
+  
+  # Scan Dockerfile
+  trivy config Dockerfile
+  
+  # Scan filesystem
+  trivy fs /path/to/project
+  ```
+  
+  GITHUB ACTIONS TRIVY:
+  ```yaml
+  - name: Run Trivy vulnerability scanner
+    uses: aquasecurity/trivy-action@master
+    with:
+      image-ref: 'myapp:latest'
+      format: 'sarif'
+      output: 'trivy-results.sarif'
+      severity: 'CRITICAL,HIGH'
+      exit-code: '1'  # Fail pipeline se vulnerabilities
+  ```
+
+▸ MULTI-STAGE BUILDS
+  □ Separare build stage da runtime stage
+  □ Copiare solo artifacts necessari (no devDependencies, build tools)
+  □ Ridurre dimensione finale immagine
+  
+  ESEMPIO NODE.JS MULTI-STAGE:
+  ```dockerfile
+  # Stage 1: Build
+  FROM node:18-alpine AS builder
+  WORKDIR /app
+  COPY package*.json ./
+  RUN npm ci --only=production && npm cache clean --force
+  COPY . .
+  RUN npm run build
+  
+  # Stage 2: Runtime
+  FROM node:18-alpine
+  WORKDIR /app
+  
+  # Crea user non-root
+  RUN addgroup -g 1001 -S nodejs && \
+      adduser -S nodejs -u 1001
+  
+  # Copia solo necessario
+  COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
+  COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
+  COPY --from=builder --chown=nodejs:nodejs /app/package.json ./
+  
+  USER nodejs
+  EXPOSE 3000
+  CMD ["node", "dist/server.js"]
+  ```
+  
+  ESEMPIO PYTHON MULTI-STAGE:
+  ```dockerfile
+  # Stage 1: Build
+  FROM python:3.11-slim AS builder
+  WORKDIR /app
+  COPY requirements.txt .
+  RUN pip install --user --no-cache-dir -r requirements.txt
+  
+  # Stage 2: Runtime
+  FROM python:3.11-slim
+  WORKDIR /app
+  
+  # Crea user non-root
+  RUN useradd -m -u 1001 appuser
+  
+  # Copia dependencies
+  COPY --from=builder --chown=appuser:appuser /root/.local /home/appuser/.local
+  COPY --chown=appuser:appuser . .
+  
+  ENV PATH=/home/appuser/.local/bin:$PATH
+  USER appuser
+  EXPOSE 8000
+  CMD ["python", "app.py"]
+  ```
+
+▸ UTENTE NON-ROOT OBBLIGATORIO
+  □ MAI eseguire container come root
+  □ Creare utente dedicato con UID/GID specifico (1000-65535)
+  □ USER directive nel Dockerfile
+  □ --user flag in docker run
+  
+  ```dockerfile
+  # Alpine
+  RUN addgroup -g 1001 -S appgroup && \
+      adduser -S appuser -u 1001 -G appgroup
+  
+  # Debian/Ubuntu
+  RUN groupadd -r appgroup --gid=1001 && \
+      useradd -r -g appgroup --uid=1001 --home-dir=/app --shell=/bin/bash appuser
+  
+  # Imposta ownership
+  RUN chown -R appuser:appgroup /app
+  
+  # Switch to non-root
+  USER appuser
+  ```
+
+▸ MINIMIZZARE LAYER E DIMENSIONE
+  □ Combinare comandi RUN con &&
+  □ Rimuovere cache package manager
+  □ .dockerignore per escludere file non necessari
+  □ Cleanup in stesso layer
+  
+  DOCKERFILE OTTIMIZZATO:
+  ```dockerfile
+  FROM node:18-alpine
+  
+  # Combina comandi per ridurre layer
+  RUN apk add --no-cache \
+      python3 \
+      make \
+      g++ \
+      && npm install -g npm@latest \
+      && rm -rf /var/cache/apk/*
+  
+  WORKDIR /app
+  COPY package*.json ./
+  RUN npm ci --only=production && npm cache clean --force
+  COPY . .
+  
+  USER node
+  CMD ["node", "server.js"]
+  ```
+  
+  .dockerignore:
+  ```
+  node_modules
+  npm-debug.log
+  .git
+  .gitignore
+  .env
+  .env.local
+  README.md
+  Dockerfile
+  docker-compose.yml
+  .vscode
+  .idea
+  *.log
+  test
+  tests
+  __pycache__
+  *.pyc
+  .pytest_cache
+  coverage
+  ```
+
+▸ IMAGE SIGNING E VERIFICATION
+  □ Docker Content Trust (DCT) con Notary
+  □ Cosign per signing images
+  □ Verificare firma prima del deploy
+  
+  DOCKER CONTENT TRUST:
+  ```bash
+  # Enable DCT
+  export DOCKER_CONTENT_TRUST=1
+  
+  # Push con auto-signing
+  docker push myrepo/myimage:v1.0
+  
+  # Pull verifica automaticamente firma
+  docker pull myrepo/myimage:v1.0
+  ```
+  
+  COSIGN:
+  ```bash
+  # Install cosign
+  brew install cosign
+  
+  # Generate key pair
+  cosign generate-key-pair
+  
+  # Sign image
+  cosign sign --key cosign.key myrepo/myimage:v1.0
+  
+  # Verify signature
+  cosign verify --key cosign.pub myrepo/myimage:v1.0
+  ```
+
+2.2 CONFIGURAZIONE DEI CONTAINER
+───────────────────────────────────────────────────────────────────────────────
+
+▸ LIMITARE LINUX CAPABILITIES
+  □ Drop ALL capabilities di default
+  □ Aggiungere solo capabilities strettamente necessarie
+  □ Evitare CAP_SYS_ADMIN, CAP_NET_ADMIN (troppo potenti)
+  
+  DOCKER RUN:
+  ```bash
+  # Drop all, add solo necessarie
+  docker run --cap-drop=ALL --cap-add=NET_BIND_SERVICE myapp
+  
+  # Capabilities comuni sicure:
+  # - NET_BIND_SERVICE: bind porte < 1024
+  # - CHOWN: cambiare ownership files
+  # - DAC_OVERRIDE: bypass file permissions
+  # - SETGID, SETUID: cambiare GID/UID
+  ```
+  
+  DOCKER COMPOSE:
+  ```yaml
+  services:
+    app:
+      image: myapp:latest
+      cap_drop:
+        - ALL
+      cap_add:
+        - NET_BIND_SERVICE
+      security_opt:
+        - no-new-privileges:true
+  ```
+
+▸ SECURITY OPTIONS
+  □ no-new-privileges: previene privilege escalation
+  □ AppArmor/SELinux profiles
+  □ Seccomp profiles per limitare syscalls
+  
+  ```bash
+  # No new privileges
+  docker run --security-opt=no-new-privileges:true myapp
+  
+  # AppArmor profile
+  docker run --security-opt="apparmor=docker-default" myapp
+  
+  # SELinux context
+  docker run --security-opt="label=level:s0:c100,c200" myapp
+  
+  # Custom Seccomp profile
+  docker run --security-opt seccomp=/path/to/seccomp-profile.json myapp
+  ```
+  
+  SECCOMP PROFILE EXAMPLE (seccomp-profile.json):
+  ```json
+  {
+    "defaultAction": "SCMP_ACT_ERRNO",
+    "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"],
+    "syscalls": [
+      {
+        "names": ["read", "write", "open", "close", "stat", "fstat", "lstat",
+                  "poll", "lseek", "mmap", "mprotect", "munmap", "brk",
+                  "rt_sigaction", "rt_sigprocmask", "ioctl", "access",
+                  "socket", "connect", "accept", "sendto", "recvfrom",
+                  "bind", "listen", "select", "clone", "fork", "vfork",
+                  "execve", "exit", "wait4", "kill", "fcntl", "getpid"],
+        "action": "SCMP_ACT_ALLOW"
+      }
+    ]
+  }
+  ```
+
+▸ READ-ONLY FILESYSTEM
+  □ Root filesystem read-only quando possibile
+  □ tmpfs per directory che richiedono scrittura
+  □ Volume mount per data persistenti
+  
+  ```bash
+  # Read-only root filesystem
+  docker run --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid,size=100m \
+    --tmpfs /var/run:rw,noexec,nosuid,size=50m \
+    myapp
+  ```
+  
+  DOCKER COMPOSE:
+  ```yaml
+  services:
+    app:
+      image: myapp:latest
+      read_only: true
+      tmpfs:
+        - /tmp:rw,noexec,nosuid,size=100m
+        - /var/run:rw,noexec,nosuid,size=50m
+      volumes:
+        - app-data:/var/lib/app:rw
+  volumes:
+    app-data:
+  ```
+
+▸ LIMITARE RISORSE (RESOURCE LIMITS)
+  □ Memory limits: prevenire OOM sulla macchina host
+  □ CPU limits: prevenire CPU starvation
+  □ PIDs limit: prevenire fork bomb
+  □ Disk I/O limits
+  
+  DOCKER RUN:
+  ```bash
+  docker run \
+    --memory="512m" \
+    --memory-reservation="256m" \
+    --memory-swap="1g" \
+    --cpus="1.5" \
+    --cpu-shares=1024 \
+    --pids-limit=100 \
+    --ulimit nofile=1024:1024 \
+    myapp
+  ```
+  
+  DOCKER COMPOSE:
+  ```yaml
+  services:
+    app:
+      image: myapp:latest
+      deploy:
+        resources:
+          limits:
+            cpus: '1.5'
+            memory: 512M
+          reservations:
+            cpus: '0.5'
+            memory: 256M
+      pids_limit: 100
+      ulimits:
+        nofile:
+          soft: 1024
+          hard: 1024
+  ```
+  
+  KUBERNETES:
+  ```yaml
+  apiVersion: v1
+  kind: Pod
+  metadata:
+    name: myapp
+  spec:
+    containers:
+    - name: app
+      image: myapp:latest
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "500m"
+        limits:
+          memory: "512Mi"
+          cpu: "1500m"
+  ```
+
+▸ PROTEGGERE DOCKER SOCKET
+  □ MAI montare /var/run/docker.sock in container (rischio altissimo)
+  □ Se necessario, usare Docker-in-Docker (DinD) isolato
+  □ Alternativa: Docker socket proxy con whitelist
+  
+  ```bash
+  # ❌ PERICOLOSISSIMO - Accesso completo all'host Docker
+  docker run -v /var/run/docker.sock:/var/run/docker.sock myapp  # NO!
+  
+  # ✅ SE NECESSARIO - Docker-in-Docker isolato
+  docker run --privileged --name dind-container docker:dind
+  ```
+  
+  DOCKER SOCKET PROXY (tecnisys/docker-socket-proxy):
+  ```yaml
+  services:
+    docker-proxy:
+      image: tecnativa/docker-socket-proxy
+      environment:
+        CONTAINERS: 1
+        IMAGES: 1
+        INFO: 1
+        NETWORKS: 0
+        VOLUMES: 0
+        POST: 0  # Disabilita operazioni di scrittura
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock:ro
+      ports:
+        - "2375:2375"
+  ```
+
+▸ USER NAMESPACE REMAPPING
+  □ Mappare root nel container a unprivileged user sull'host
+  □ Attivare userns-remap in Docker daemon
+  
+  /etc/docker/daemon.json:
+  ```json
+  {
+    "userns-remap": "default"
+  }
+  ```
+  
+  ```bash
+  # Restart Docker daemon
+  sudo systemctl restart docker
+  
+  # Verifica
+  docker info | grep "User Namespace"
+  ```
+
+2.3 RETI E ACCESSO
+───────────────────────────────────────────────────────────────────────────────
+
+▸ NETWORK ISOLATION
+  □ Creare reti dedicate per ogni tier (frontend, backend, database)
+  □ Default: nessun container ha accesso ad altre reti
+  □ Comunicazione inter-container solo su reti autorizzate
+  □ Network driver bridge per single-host, overlay per multi-host
+  
+  DOCKER NETWORK:
+  ```bash
+  # Creare reti isolate
+  docker network create --driver bridge frontend-net
+  docker network create --driver bridge backend-net
+  docker network create --driver bridge database-net
+  
+  # Container su rete specifica
+  docker run --network=backend-net myapp
+  
+  # Connect container a rete addizionale
+  docker network connect database-net myapp-backend
+  ```
+  
+  DOCKER COMPOSE:
+  ```yaml
+  version: '3.8'
+  services:
+    frontend:
+      image: nginx:alpine
+      networks:
+        - frontend-net
+      ports:
+        - "80:80"
+    
+    backend:
+      image: myapp:latest
+      networks:
+        - frontend-net
+        - backend-net
+      # No ports exposed esternamente
+    
+    database:
+      image: postgres:15-alpine
+      networks:
+        - backend-net
+      # Solo backend può accedere
+  
+  networks:
+    frontend-net:
+      driver: bridge
+    backend-net:
+      driver: bridge
+      internal: true  # No accesso esterno
+  ```
+
+▸ PORT EXPOSURE - PRINCIPIO LEAST PRIVILEGE
+  □ Esporre SOLO porte necessarie
+  □ Bind a localhost se solo accesso locale: 127.0.0.1:PORT
+  □ Reverse proxy (Nginx, Traefik) per gestire traffico esterno
+  □ No direct database/redis port exposure
+  
+  ```bash
+  # ❌ SBAGLIATO - Espone su tutte interfacce
+  docker run -p 5432:5432 postgres  # Accessibile da internet!
+  
+  # ✅ CORRETTO - Solo localhost
+  docker run -p 127.0.0.1:5432:5432 postgres
+  
+  # ✅ CORRETTO - Solo internal network
+  docker run --network backend-net postgres  # No -p flag
+  ```
+
+▸ MTLS (MUTUAL TLS) PER SERVICE-TO-SERVICE
+  □ Crittografia e autenticazione reciproca
+  □ Service mesh: Istio, Linkerd, Consul Connect
+  □ Certificate rotation automatica
+  
+  DOCKER COMPOSE CON TRAEFIK mTLS:
+  ```yaml
+  services:
+    traefik:
+      image: traefik:v2.10
+      command:
+        - "--providers.docker=true"
+        - "--entrypoints.websecure.address=:443"
+        - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      ports:
+        - "443:443"
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock:ro
+        - ./certs:/certs:ro
+    
+    backend:
+      image: myapp:latest
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.backend.rule=Host(`api.example.com`)"
+        - "traefik.http.routers.backend.tls=true"
+  ```
+
+▸ FIREWALL E IPTABLES
+  □ UFW/iptables per limitare traffico host-level
+  □ Whitelist IP per accesso amministrativo
+  □ Drop tutto, allow esplicito
+  
+  ```bash
+  # UFW rules
+  sudo ufw default deny incoming
+  sudo ufw default allow outgoing
+  sudo ufw allow from 10.0.1.0/24 to any port 22  # SSH solo da subnet specifica
+  sudo ufw allow 80/tcp
+  sudo ufw allow 443/tcp
+  sudo ufw enable
+  
+  # iptables Docker chains
+  # Limitare accesso a Docker published ports
+  iptables -I DOCKER-USER -i eth0 -p tcp --dport 5432 -j DROP
+  iptables -I DOCKER-USER -i eth0 -s 10.0.1.0/24 -p tcp --dport 5432 -j ACCEPT
+  ```
+
+2.4 GESTIONE DEI SECRET E CREDENZIALI
+───────────────────────────────────────────────────────────────────────────────
+
+▸ MAI HARDCODARE SECRETS
+  □ No password/keys in Dockerfile, docker-compose.yml, codice
+  □ No secrets in environment variables (visibili in docker inspect)
+  □ No secrets in image layers (rimangono in history)
+  
+  ```dockerfile
+  # ❌ SBAGLIATO
+  ENV DB_PASSWORD=mysecretpassword  # NO!
+  RUN echo "api_key=abc123" > config.txt  # NO!
+  ARG SECRET_KEY=hardcoded  # NO!
+  ```
+
+▸ DOCKER SECRETS (SWARM MODE)
+  □ Encrypted storage, disponibili solo a servizi autorizzati
+  □ Mounted in /run/secrets/ come file read-only
+  
+  ```bash
+  # Creare secret
+  echo "MySecurePassword123!" | docker secret create db_password -
+  
+  # O da file
+  docker secret create db_password ./db_password.txt
+  
+  # Usare in service
+  docker service create \
+    --name myapp \
+    --secret db_password \
+    myapp:latest
+  ```
+  
+  DOCKER STACK (docker-compose with secrets):
+  ```yaml
+  version: '3.8'
+  services:
+    app:
+      image: myapp:latest
+      secrets:
+        - db_password
+        - api_key
+      environment:
+        DB_PASSWORD_FILE: /run/secrets/db_password
+  
+  secrets:
+    db_password:
+      external: true
+    api_key:
+      file: ./api_key.txt
+  ```
+  
+  READ SECRET IN APP:
+  ```javascript
+  // Node.js
+  const fs = require('fs');
+  const dbPassword = fs.readFileSync('/run/secrets/db_password', 'utf8').trim();
+  ```
+
+▸ HASHICORP VAULT
+  □ Centralized secrets management
+  □ Dynamic secrets con TTL
+  □ Audit log completo
+  □ Encryption as a service
+  
+  ```bash
+  # Docker Compose con Vault
+  docker run --name vault \
+    --cap-add=IPC_LOCK \
+    -e 'VAULT_DEV_ROOT_TOKEN_ID=myroot' \
+    -p 8200:8200 \
+    vault:latest
+  
+  # Store secret
+  vault kv put secret/myapp db_password="SecurePass123"
+  
+  # Read secret in app
+  curl -H "X-Vault-Token: $VAULT_TOKEN" \
+    https://vault.example.com:8200/v1/secret/data/myapp
+  ```
+
+▸ AWS SECRETS MANAGER / AZURE KEY VAULT / GCP SECRET MANAGER
+  □ Cloud-native secrets management
+  □ IAM integration per access control
+  □ Automatic rotation
+  
+  NODE.JS AWS SECRETS MANAGER:
+  ```javascript
+  const AWS = require('aws-sdk');
+  const secretsManager = new AWS.SecretsManager({ region: 'us-east-1' });
+  
+  async function getSecret(secretName) {
+    const data = await secretsManager.getSecretValue({ SecretId: secretName }).promise();
+    return JSON.parse(data.SecretString);
+  }
+  
+  const secrets = await getSecret('myapp/production/db');
+  const dbPassword = secrets.password;
+  ```
+
+▸ VOLUME PERMISSIONS
+  □ Volumi con dati sensibili: owner specific user, mode 600
+  □ Mount read-only quando possibile
+  □ Encrypted volumes (LUKS)
+  
+  ```yaml
+  services:
+    app:
+      image: myapp:latest
+      volumes:
+        - ./sensitive-data:/data:ro  # Read-only
+        - app-secrets:/run/secrets:ro,mode=0400
+  ```
+
+2.5 SICUREZZA DEL RUNTIME
+───────────────────────────────────────────────────────────────────────────────
+
+▸ LINUX SECURITY MODULES
+  □ AppArmor (Ubuntu/Debian)
+  □ SELinux (RHEL/CentOS/Fedora)
+  □ Seccomp (syscall filtering) - già coperto in 2.2
+  
+  APPARMOR:
+  ```bash
+  # Check AppArmor status
+  sudo aa-status
+  
+  # Docker usa profile "docker-default"
+  docker run --security-opt apparmor=docker-default myapp
+  
+  # Custom profile
+  sudo apparmor_parser -r -W /path/to/custom-profile
+  docker run --security-opt apparmor=custom-profile myapp
+  ```
+  
+  SELINUX:
+  ```bash
+  # Check SELinux
+  getenforce
+  
+  # Docker con SELinux
+  docker run --security-opt label=type:svirt_apache_t myapp
+  ```
+
+▸ RUNTIME MONITORING E THREAT DETECTION
+  □ Falco: runtime security, detect anomalie
+  □ Sysdig: system call monitoring
+  □ cAdvisor: container metrics
+  □ Prometheus + Grafana: metrics visualization
+  
+  FALCO INSTALLATION:
+  ```bash
+  # Install Falco
+  curl -s https://falco.org/repo/falcosecurity-3672BA8F.asc | apt-key add -
+  echo "deb https://download.falco.org/packages/deb stable main" | \
+    tee -a /etc/apt/sources.list.d/falcosecurity.list
+  apt-get update
+  apt-get install -y falco
+  
+  # Start Falco
+  systemctl start falco
+  
+  # Check logs
+  journalctl -fu falco
+  ```
+  
+  FALCO RULES EXAMPLES (detecting suspicious behavior):
+  - Shell spawned in container
+  - Container accessing sensitive files
+  - Unexpected network connections
+  - Privilege escalation attempts
+  - Crypto mining detection
+
+▸ CONTAINER HEALTH CHECKS
+  □ HEALTHCHECK in Dockerfile
+  □ Restart policy per auto-recovery
+  □ Liveness e readiness probes (Kubernetes)
+  
+  DOCKERFILE HEALTHCHECK:
+  ```dockerfile
+  HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+  ```
+  
+  DOCKER COMPOSE:
+  ```yaml
+  services:
+    app:
+      image: myapp:latest
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+        interval: 30s
+        timeout: 3s
+        retries: 3
+        start_period: 40s
+      restart: unless-stopped
+  ```
+  
+  KUBERNETES:
+  ```yaml
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 3000
+    initialDelaySeconds: 30
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /ready
+      port: 3000
+    initialDelaySeconds: 5
+    periodSeconds: 5
+  ```
+
+▸ LOGGING
+  □ Container logs a stdout/stderr
+  □ Log aggregation: ELK, Loki, Splunk
+  □ Log rotation per evitare disk full
+  
+  DOCKER LOGGING DRIVER:
+  ```bash
+  docker run --log-driver json-file \
+    --log-opt max-size=10m \
+    --log-opt max-file=3 \
+    myapp
+  ```
+  
+  /etc/docker/daemon.json:
+  ```json
+  {
+    "log-driver": "json-file",
+    "log-opts": {
+      "max-size": "10m",
+      "max-file": "3"
+    }
+  }
+  ```
+
+2.6 AGGIORNAMENTI E PATCH
+───────────────────────────────────────────────────────────────────────────────
+
+▸ AUTOMATED IMAGE REBUILDS
+  □ Rebuild weekly o quando nuova base image
+  □ CI/CD pipeline automatico
+  □ Dependency updates automatici (Dependabot)
+  
+  GITHUB ACTIONS AUTO-REBUILD:
+  ```yaml
+  name: Rebuild Images Weekly
+  on:
+    schedule:
+      - cron: '0 2 * * 1'  # Ogni lunedì alle 2am
+    workflow_dispatch:
+  
+  jobs:
+    build:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v3
+        - name: Build and push
+          run: |
+            docker build -t myrepo/myapp:latest .
+            docker push myrepo/myapp:latest
+  ```
+
+▸ PATCH DOCKER ENGINE E HOST
+  □ Aggiornare Docker Engine regolarmente
+  □ Patch kernel Linux per security fixes
+  □ Automated security updates (unattended-upgrades)
+  
+  ```bash
+  # Update Docker
+  sudo apt-get update
+  sudo apt-get install docker-ce docker-ce-cli containerd.io
+  
+  # Unattended upgrades (Ubuntu/Debian)
+  sudo apt-get install unattended-upgrades
+  sudo dpkg-reconfigure --priority=low unattended-upgrades
+  ```
+
+▸ VULNERABILITY MONITORING
+  □ Subscribe a CVE feeds: NVD, Docker Security, Alpine/Debian security
+  □ Automated scanning in CI/CD (Trivy, Snyk)
+  □ Alerting per critical vulnerabilities
+  
+  WATCHTOWER (auto-update containers):
+  ```yaml
+  services:
+    watchtower:
+      image: containrrr/watchtower
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+      environment:
+        - WATCHTOWER_POLL_INTERVAL=86400  # 24 ore
+        - WATCHTOWER_CLEANUP=true
+        - WATCHTOWER_INCLUDE_STOPPED=true
+  ```
+  
+  NOTE: Watchtower è comodo ma rischioso per produzione (no controllo).
+  Meglio: CI/CD controllato con test automatici prima del deploy.
+
+═══════════════════════════════════════════════════════════════════════════════
+3. CI/CD E AUTOMAZIONE SICUREZZA
+═══════════════════════════════════════════════════════════════════════════════
+
+▸ SECURITY IN CI/CD PIPELINE
+  □ Step obbligatori: lint → SAST → test → build → scan image → DAST → deploy
+  □ Bloccare pipeline se security issues (critical/high)
+  □ Manual approval per production deploy
+  
+  GITHUB ACTIONS SECURITY PIPELINE:
+  ```yaml
+  name: Security CI/CD Pipeline
+  
+  on:
+    push:
+      branches: [main, develop]
+    pull_request:
+      branches: [main]
+  
+  jobs:
+    security-scan:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v3
+        
+        # 1. Dependency audit
+        - name: Run npm audit
+          run: npm audit --audit-level=moderate
+        
+        # 2. Secret scanning
+        - name: Gitleaks
+          uses: gitleaks/gitleaks-action@v2
+        
+        # 3. SAST
+        - name: Run Semgrep
+          uses: returntocorp/semgrep-action@v1
+          with:
+            config: auto
+        
+        # 4. Build
+        - name: Build Docker image
+          run: docker build -t myapp:${{ github.sha }} .
+        
+        # 5. Image scanning
+        - name: Run Trivy
+          uses: aquasecurity/trivy-action@master
+          with:
+            image-ref: myapp:${{ github.sha }}
+            severity: 'CRITICAL,HIGH'
+            exit-code: '1'
+        
+        # 6. Push to registry
+        - name: Push to registry
+          run: |
+            echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+            docker tag myapp:${{ github.sha }} myrepo/myapp:latest
+            docker push myrepo/myapp:latest
+  
+    deploy-staging:
+      needs: security-scan
+      runs-on: ubuntu-latest
+      if: github.ref == 'refs/heads/develop'
+      steps:
+        - name: Deploy to staging
+          run: ./deploy-staging.sh
+    
+    deploy-production:
+      needs: security-scan
+      runs-on: ubuntu-latest
+      if: github.ref == 'refs/heads/main'
+      environment:
+        name: production
+        url: https://example.com
+      steps:
+        - name: Deploy to production
+          run: ./deploy-production.sh
+  ```
+
+▸ INFRASTRUCTURE AS CODE (IaC) SECURITY
+  □ Terraform/CloudFormation security scanning
+  □ Checkov, tfsec, terrascan
+  □ Policy as Code: Open Policy Agent (OPA)
+  
+  ```bash
+  # Checkov scan
+  checkov -d . --framework terraform
+  
+  # tfsec scan
+  tfsec .
+  
+  # Terrascan
+  terrascan scan -t terraform
+  ```
+
+▸ SIGNED COMMITS E ARTIFACTS
+  □ GPG signing per commits
+  □ Artifact signing (cosign)
+  □ SBOM (Software Bill of Materials) generation
+  
+  ```bash
+  # Generate SBOM
+  syft myapp:latest -o spdx-json > sbom.json
+  
+  # Sign SBOM
+  cosign sign-blob --key cosign.key sbom.json > sbom.json.sig
+  ```
+
+═══════════════════════════════════════════════════════════════════════════════
+4. MONITORING E INCIDENT RESPONSE
+═══════════════════════════════════════════════════════════════════════════════
+
+▸ MONITORING STACK
+  □ Metrics: Prometheus, Grafana
+  □ Logs: ELK Stack (Elasticsearch, Logstash, Kibana), Loki
+  □ Traces: Jaeger, Zipkin
+  □ APM: Datadog, New Relic, Dynatrace
+  □ Uptime monitoring: UptimeRobot, Pingdom
+  
+▸ SECURITY MONITORING
+  □ Failed login attempts
+  □ Unusual API usage patterns
+  □ Privilege escalation
+  □ Data exfiltration indicators
+  □ Certificate expiration
+  
+  PROMETHEUS ALERTING RULES:
+  ```yaml
+  groups:
+    - name: security_alerts
+      rules:
+        - alert: HighFailedLoginRate
+          expr: rate(login_failures[5m]) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High failed login rate detected"
+        
+        - alert: CertificateExpiringSoon
+          expr: (ssl_cert_expiry_seconds - time()) / 86400 < 30
+          labels:
+            severity: warning
+          annotations:
+            summary: "SSL certificate expires in < 30 days"
+  ```
+
+▸ INCIDENT RESPONSE PLAN
+  1. Detection: automated alerting
+  2. Triage: severity assessment
+  3. Containment: isolate affected systems
+  4. Eradication: remove threat
+  5. Recovery: restore services
+  6. Post-mortem: lessons learned
+  
+  PLAYBOOK TEMPLATE:
+  - Chi contattare (security team, management)
+  - Comandi per isolare container compromesso
+  - Backup restoration procedure
+  - Communication plan (internal, external)
+
+▸ BACKUP E DISASTER RECOVERY
+  □ Backup automatici giornalieri
+  □ Offsite storage (3-2-1 rule)
+  □ Test restore regolarmente
+  □ RTO (Recovery Time Objective): < 4 ore
+  □ RPO (Recovery Point Objective): < 1 ora
+  
+  ```bash
+  # Database backup
+  docker exec postgres pg_dump -U user dbname > backup.sql
+  
+  # Volume backup
+  docker run --rm -v myvolume:/data -v $(pwd):/backup \
+    alpine tar czf /backup/myvolume-$(date +%Y%m%d).tar.gz /data
+  ```
+
+═══════════════════════════════════════════════════════════════════════════════
+5. COMPLIANCE E AUDIT
+═══════════════════════════════════════════════════════════════════════════════
+
+▸ COMPLIANCE FRAMEWORKS
+  □ GDPR: data protection EU
+  □ HIPAA: healthcare USA
+  □ PCI-DSS: payment card industry
+  □ SOC 2: security, availability, confidentiality
+  □ ISO 27001: information security management
+  
+▸ AUDIT TRAIL
+  □ Immutable logs
+  □ Log retention policy documented
+  □ Chi ha accesso a cosa, quando
+  □ Tutte le modifiche dati sensibili
+  
+▸ ACCESS REVIEW
+  □ Quarterly review degli accessi utenti
+  □ Rimuovere utenti inattivi
+  □ Principle of least privilege enforcement
+  
+▸ SECURITY ASSESSMENTS
+  □ Penetration testing: annuale (minimo)
+  □ Vulnerability assessments: trimestrale
+  □ Code review: ogni release
+  □ Third-party audits: annuale
+
+═══════════════════════════════════════════════════════════════════════════════
+6. CHECKLIST PRE-DEPLOY
+═══════════════════════════════════════════════════════════════════════════════
+
+APPLICAZIONE:
+□ JWT secrets configurati (min 32 char)
+□ Password hashing con bcrypt/Argon2
+□ Input validation implementata
+□ Rate limiting attivo
+□ HTTPS/TLS configurato
+□ CORS configurato correttamente
+□ CSP headers configurati
+□ Error handling non espone info sensibili
+□ Logging sicuro (no sensitive data)
+□ Environment variables esternalizzate
+□ Dependency audit pulito (no critical/high)
+□ SAST scan passed
+□ Unit e integration test passed
+
+DOCKER:
+□ Immagine base ufficiale e versioned
+□ Multi-stage build utilizzato
+□ Utente non-root configurato
+□ Health check implementato
+□ Image scanning passed (Trivy)
+□ .dockerignore configurato
+□ Secrets non in Dockerfile/env vars
+□ Resource limits configurati
+□ Security-opt: no-new-privileges
+□ Capabilities dropped (cap-drop: ALL)
+□ Read-only filesystem (se possibile)
+□ Network isolation configurata
+□ Volume permissions corretti
+
+INFRASTRUTTURA:
+□ Firewall configurato
+□ SSH key-based auth (no password)
+□ SSH su porta non-standard
+□ Fail2ban attivo
+□ Automatic security updates abilitati
+□ Monitoring configurato (Prometheus/Grafana)
+□ Log aggregation configurato
+□ Backup automatici configurati
+□ Backup restore testato
+□ Disaster recovery plan documentato
+□ TLS certificates validi e non in scadenza
+□ DNS e domini configurati correttamente
+
+CI/CD:
+□ Pipeline con security steps
+□ Manual approval per produzione
+□ Automated tests
+□ Rollback strategy definita
+□ Blue-green o canary deployment
+□ Secrets in CI/CD vault (GitHub Secrets, GitLab CI Variables)
+
+DOCUMENTAZIONE:
+□ Architecture diagram aggiornato
+□ API documentation aggiornata
+□ Security incident response plan
+□ Runbook per deploy e recovery
+□ Onboarding docs per nuovi developer
+
+═══════════════════════════════════════════════════════════════════════════════
+RISORSE AGGIUNTIVE
+═══════════════════════════════════════════════════════════════════════════════
+
+OWASP:
+- OWASP Top 10: https://owasp.org/www-project-top-ten/
+- OWASP Docker Security: https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html
+- OWASP API Security: https://owasp.org/www-project-api-security/
+
+TOOLS:
+- Trivy: https://github.com/aquasecurity/trivy
+- Snyk: https://snyk.io/
+- Falco: https://falco.org/
+- Gitleaks: https://github.com/gitleaks/gitleaks
+- SonarQube: https://www.sonarqube.org/
+
+STANDARDS:
+- CIS Docker Benchmark: https://www.cisecurity.org/benchmark/docker
+- NIST Cybersecurity Framework: https://www.nist.gov/cyberframework
+- Docker Security Best Practices: https://docs.docker.com/engine/security/
+
+═══════════════════════════════════════════════════════════════════════════════
+FINE DOCUMENTO
+═══════════════════════════════════════════════════════════════════════════════

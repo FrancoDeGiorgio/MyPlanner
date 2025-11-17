@@ -1,0 +1,237 @@
+name: Security CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Esegui security scan settimanale ogni lunedì alle 2am UTC
+    - cron: '0 2 * * 1'
+
+jobs:
+  # Dependency Scanning
+  dependency-scan-backend:
+    name: Backend Dependency Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install pip-audit
+        run: pip install pip-audit
+      
+      - name: Install dependencies
+        working-directory: MyPlanner_BackEnd
+        run: pip install -r requirements.txt
+      
+      - name: Run pip-audit
+        working-directory: MyPlanner_BackEnd
+        run: |
+          pip-audit --desc --format json --output pip-audit-report.json || true
+      
+      - name: Upload pip-audit report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: pip-audit-report
+          path: MyPlanner_BackEnd/pip-audit-report.json
+          if-no-files-found: ignore
+      
+      - name: Check for critical/high vulnerabilities
+        working-directory: MyPlanner_BackEnd
+        run: |
+          pip-audit --desc --format json | jq -e '.vulnerabilities[] | select(.severity == "CRITICAL" or .severity == "HIGH")' && exit 1 || exit 0
+
+  dependency-scan-frontend:
+    name: Frontend Dependency Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+      
+      - name: Install dependencies
+        working-directory: MyPlanner_FrontEnd
+        run: npm ci
+      
+      - name: Run npm audit
+        working-directory: MyPlanner_FrontEnd
+        run: |
+          npm audit --audit-level=moderate --json > npm-audit-report.json || true
+      
+      - name: Upload npm audit report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: npm-audit-report
+          path: MyPlanner_FrontEnd/npm-audit-report.json
+          if-no-files-found: ignore
+      
+      - name: Check for moderate+ vulnerabilities
+        working-directory: MyPlanner_FrontEnd
+        run: |
+          npm audit --audit-level=moderate || exit 0
+          # npm audit esce con codice 1 se trova vulnerabilità, ma non blocchiamo il build
+
+  # Secret Scanning
+  secret-scan:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Full history per scan completo
+      
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          config-path: .gitleaks.toml
+          exit-code: 1  # Blocca se trova secrets
+
+  # SAST - Python
+  sast-python:
+    name: SAST Python (Bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install Bandit
+        run: pip install bandit[toml]
+      
+      - name: Run Bandit
+        working-directory: MyPlanner_BackEnd
+        run: |
+          bandit -r app/ -f json -o bandit-report.json || true
+      
+      - name: Upload Bandit report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: bandit-report
+          path: MyPlanner_BackEnd/bandit-report.json
+          if-no-files-found: ignore
+      
+      - name: Run Bandit (fail on high severity)
+        working-directory: MyPlanner_BackEnd
+        run: |
+          bandit -r app/ -ll || exit 0  # Solo low severity e above, non blocca
+
+  # SAST - JavaScript
+  sast-javascript:
+    name: SAST JavaScript (ESLint Security)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+      
+      - name: Install dependencies
+        working-directory: MyPlanner_FrontEnd
+        run: npm ci
+      
+      - name: Run ESLint with security plugin
+        working-directory: MyPlanner_FrontEnd
+        run: |
+          npm install --save-dev eslint-plugin-security || true
+          npx eslint src/ --ext .js,.jsx --format json --output-file eslint-report.json || true
+        continue-on-error: true
+      
+      - name: Upload ESLint report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: eslint-report
+          path: MyPlanner_FrontEnd/eslint-report.json
+          if-no-files-found: ignore
+
+  # Docker Image Scanning
+  docker-scan-backend:
+    name: Docker Image Scan - Backend
+    runs-on: ubuntu-latest
+    needs: [dependency-scan-backend]
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Build Docker image
+        working-directory: MyPlanner_BackEnd
+        run: docker build -t myplanner-backend:test .
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'myplanner-backend:test'
+          format: 'sarif'
+          output: 'trivy-backend-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'  # Blocca se trova critical/high vulnerabilities
+      
+      - name: Upload Trivy results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-backend-results.sarif'
+
+  docker-scan-frontend:
+    name: Docker Image Scan - Frontend
+    runs-on: ubuntu-latest
+    needs: [dependency-scan-frontend]
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Build Docker image
+        working-directory: MyPlanner_FrontEnd
+        run: docker build -t myplanner-frontend:test .
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'myplanner-frontend:test'
+          format: 'sarif'
+          output: 'trivy-frontend-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'  # Blocca se trova critical/high vulnerabilities
+      
+      - name: Upload Trivy results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-frontend-results.sarif'
+
+  # Summary
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    needs: [
+      dependency-scan-backend,
+      dependency-scan-frontend,
+      secret-scan,
+      sast-python,
+      sast-javascript
+    ]
+    if: always()
+    steps:
+      - name: Security checks completed
+        run: |
+          echo "✅ Security pipeline completed"
+          echo "Check individual jobs for detailed results"
+

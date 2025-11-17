@@ -1,0 +1,114 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: myplanner_db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-myplanner}
+      POSTGRES_USER: ${POSTGRES_USER:-myplanner}
+      # CRITICO: Usa variabile d'ambiente esterna, non hardcoded!
+      # Imposta POSTGRES_PASSWORD come variabile d'ambiente o in docker-compose.env
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_IN_PRODUCTION}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    # Bind solo su localhost per sicurezza (non esporre su tutte le interfacce)
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./MyPlanner_BackEnd/db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  backend:
+    build:
+      context: ./MyPlanner_BackEnd
+    container_name: myplanner_backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # DATABASE_URL costruita dalle variabili d'ambiente per sicurezza
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-myplanner}:${POSTGRES_PASSWORD:-CHANGE_ME}@db:5432/${POSTGRES_DB:-myplanner}}
+      DB_SSLMODE: disable
+      DB_OPTIONS: ""
+      # SECRET_KEY OBBLIGATORIA - deve essere impostata come variabile d'ambiente esterna
+      # In produzione, usa Docker secrets o secret manager (AWS Secrets Manager, Vault, etc.)
+      SECRET_KEY: ${SECRET_KEY}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - ./MyPlanner_BackEnd:/app
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    # Drop tutte le capabilities e aggiungi solo quelle necessarie
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE  # Necessario per bind su porta < 1024 (se necessario)
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    # Restart policy
+    restart: unless-stopped
+    # Le migrazioni e l'avvio dell'app sono gestiti da entrypoint.sh
+
+  frontend:
+    build:
+      context: ./MyPlanner_FrontEnd
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:${BACKEND_PORT:-8000}}
+    container_name: myplanner_frontend
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    # Drop tutte le capabilities MA aggiungi quelle necessarie per Nginx
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN  # Per cambiare ownership dei file se necessario
+      - SETGID # Per cambiare group ID
+      - SETUID # Per cambiare user ID
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    restart: unless-stopped
+
+volumes:
+  db_data:
+
