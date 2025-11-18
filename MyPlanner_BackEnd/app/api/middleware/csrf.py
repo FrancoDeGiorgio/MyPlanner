@@ -39,6 +39,10 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         "/auth/refresh"    # Refresh token (usa cookie httpOnly)
     ]
     
+    # Header che indica client mobile (app mobile non vulnerabili a CSRF)
+    MOBILE_CLIENT_HEADER = "X-Client-Type"
+    MOBILE_CLIENT_VALUE = "mobile"
+    
     async def dispatch(self, request: Request, call_next):
         """
         Intercetta richieste per validazione CSRF.
@@ -57,6 +61,11 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         
         # Skip CSRF per endpoint esenti
         if request.url.path in self.EXEMPT_PATHS:
+            return await call_next(request)
+        
+        # Skip CSRF per app mobile (non vulnerabili a CSRF come i browser web)
+        client_type = request.headers.get(self.MOBILE_CLIENT_HEADER)
+        if client_type == self.MOBILE_CLIENT_VALUE:
             return await call_next(request)
         
         # Estrai token da cookie e header
