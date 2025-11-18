@@ -172,11 +172,12 @@ def login_for_access_token(
     
     # Imposta refresh token in httpOnly cookie per protezione XSS
     # Access token rimane in JSON response (deve essere leggibile dal client per Authorization header)
+    from app.core.config import ENVIRONMENT
     response.set_cookie(
         key="refresh_token",
         value=token["refresh_token"],
         httponly=True,  # Non accessibile via JavaScript (protezione XSS)
-        secure=True,  # Solo HTTPS (in produzione)
+        secure=(ENVIRONMENT == "production"),  # Solo HTTPS in produzione
         samesite="strict",  # Protezione CSRF
         max_age=7 * 24 * 60 * 60,  # 7 giorni (in secondi)
         path="/auth"  # Disponibile solo su /auth/* endpoints
